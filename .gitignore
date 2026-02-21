@@ -9,3 +9,10 @@ __pycache__/
 env/
 venv/
 *.log
+node_modules/
+.env
+!.env.example
+dist/
+build/
+*.db
+backend/*.db

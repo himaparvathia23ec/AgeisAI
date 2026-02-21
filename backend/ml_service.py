@@ -59,7 +59,13 @@ class MLService:
             raise ModelLoadError("Loaded ML artifacts are empty or invalid.")
 
     def ensure_loaded(self) -> None:
-        if self.model is None or self.vectorizer is None:
+        if self.model is not None and self.vectorizer is not None:
+            return
+        try:
+            self.load()
+        except ModelLoadError:
+            logger.warning("ML artifacts missing or invalid; training fallback model.")
+            train_fallback_and_save(self.model_path, self.vectorizer_path)
             self.load()
 
     def _confidence_and_pred(self, X: Any) -> tuple[float, int]:
