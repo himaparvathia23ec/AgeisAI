@@ -33,7 +33,6 @@ from utils import (
     calculate_final_risk_score,
     calculate_url_risk_score,
     extract_urls,
-    get_cors_origins,
     load_env,
     severity_from_confidence,
     severity_from_risk_score,
@@ -55,10 +54,13 @@ app = FastAPI(
     description="FastAPI service for phishing detection with Gmail integration.",
 )
 
-# CORS middleware - allow frontend origin
+# CORS middleware - allow frontend origin (local + Vercel)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=get_cors_origins(),
+    allow_origins=[
+        "http://localhost:3000",
+        "https://ageis-pl0vmfsra-hima-parvathi-as-projects.vercel.app",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
