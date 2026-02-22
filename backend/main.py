@@ -100,8 +100,15 @@ async def gmail_callback(code: str = Query(...)):
 
         user_info = gmail.get_user_info()
         logger.info("Gmail connected for %s", user_info.get("email"))
-
-        encoded = encode_token(token_data)
+        # Include user_info so frontend can set user state after redirect (login flow)
+        payload = {
+            "token_data": token_data,
+            "user_info": {
+                "email": user_info.get("email", ""),
+                "name": user_info.get("name", user_info.get("email", "")),
+            },
+        }
+        encoded = encode_token(payload)
 
         # ✅ IMPORTANT: Redirect to your Vercel frontend
         frontend_dashboard = (
