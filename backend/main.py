@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import base64
+import json
 import logging
 from datetime import datetime
+from urllib.parse import urlencode
 
 import secrets
 from fastapi import FastAPI, HTTPException, Query
@@ -164,13 +167,19 @@ async def get_gmail_auth_url() -> dict[str, str]:
         raise HTTPException(status_code=500, detail=str(e)) from e
 
 
+def _encode_token_for_redirect(token_data: dict) -> str:
+    """Encode token_data as base64url for URL-safe redirect (access_token, refresh_token, client_id, client_secret, token_uri, scopes)."""
+    payload = json.dumps(token_data).encode("utf-8")
+    return base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
+
+
 @app.get("/auth/gmail/callback", response_model=None)
 async def auth_gmail_callback(
     code: str = Query(..., description="Authorization code from Google"),
     state: str | None = Query(None),
     format: str | None = Query(None, alias="format"),
 ):
-    """Receive code from Google, exchange for tokens. Returns JSON or redirects to frontend with state for claim."""
+    """Receive code from Google, exchange for tokens. Redirects to dashboard?token=ENCODED or returns JSON if format=json."""
     try:
         gmail_service = GmailService()
         token_data = gmail_service.exchange_code_for_token(code)
@@ -178,25 +187,30 @@ async def auth_gmail_callback(
         user_info = gmail_service.get_user_info()
         logger.info("Gmail callback: token exchange success for email=%s", user_info.get("email"))
 
-        access_token = token_data.get("token")
-        refresh_token = token_data.get("refresh_token")
-        id_token = token_data.get("id_token")  # Gmail OAuth typically does not return id_token
+        # Ensure token_data has all fields frontend expects
+        out = {
+            "token": token_data.get("token"),
+            "refresh_token": token_data.get("refresh_token"),
+            "client_id": token_data.get("client_id"),
+            "client_secret": token_data.get("client_secret"),
+            "token_uri": token_data.get("token_uri"),
+            "scopes": token_data.get("scopes") or [],
+        }
 
         if format == "json":
             return JSONResponse(
                 status_code=200,
                 content={
-                    "access_token": access_token,
-                    "refresh_token": refresh_token,
-                    "id_token": id_token,
+                    "access_token": out["token"],
+                    "refresh_token": out["refresh_token"],
+                    "token_data": out,
                 },
             )
 
-        # Default: redirect to frontend with state so it can claim full token_data
-        claim_state = state or secrets.token_urlsafe(32)
-        _pending_gmail_tokens[claim_state] = token_data
-        frontend_url = "http://localhost:3000"
-        return RedirectResponse(url=f"{frontend_url}/#gmail-state={claim_state}", status_code=302)
+        encoded_token = _encode_token_for_redirect(out)
+        frontend_url = "http://localhost:3000/dashboard"
+        redirect_url = f"{frontend_url}?{urlencode({'token': encoded_token})}"
+        return RedirectResponse(url=redirect_url, status_code=302)
     except Exception as e:
         err_msg = str(e)
         logger.warning("Gmail callback exchange failed: %s", err_msg)
@@ -253,12 +267,21 @@ async def exchange_gmail_code(request: GmailCodeRequest):
         )
 
 
+def _severity_to_risk(severity: str) -> str:
+    """Map severity to frontend risk level: low, medium, high."""
+    if severity == "CRITICAL":
+        return "high"
+    if severity == "WARNING":
+        return "medium"
+    return "low"
+
+
 @app.post("/auth/fetch-emails")
 async def fetch_and_analyze_emails(
     token_data: dict,
     max_results: int = Query(default=50, ge=1, le=100),
 ) -> dict:
-    """Fetch emails from Gmail and analyze them."""
+    """Fetch emails from Gmail, analyze each, move high-risk to Trash. Returns list of EmailResult-like items."""
     required = {"token", "token_uri", "client_id", "client_secret", "scopes"}
     if not all(k in token_data for k in required):
         raise HTTPException(
@@ -270,50 +293,52 @@ async def fetch_and_analyze_emails(
         gmail_service.set_credentials(token_data)
         user_info = gmail_service.get_user_info()
         user_email = user_info["email"]
-        
-        # Fetch emails
+
         emails = gmail_service.fetch_emails(max_results=max_results)
-        
-        # Analyze each email
         results = []
+
         for email in emails:
-            # Combine subject, snippet, and body for analysis
             content = f"{email['subject']} {email['snippet']} {email.get('body', '')}"
-            
-            # Run ML analysis
             ml_result = analyze_email(content)
-            
-            # Extract URLs
             urls = extract_urls(content)
             url_risk = calculate_url_risk_score(urls)
-            
-            # Calculate final risk
             final_risk = calculate_final_risk_score(ml_result.confidence, url_risk)
             severity = severity_from_risk_score(final_risk)
-            
-            # Store in database
-            timestamp = email.get('timestamp') or datetime.now().isoformat()
-            detection_id = insert_detection(
+            risk = _severity_to_risk(severity)
+            timestamp = email.get("timestamp") or datetime.now().isoformat()
+
+            insert_detection(
                 user_email=user_email,
-                sender=email['sender'],
-                subject=email['subject'],
+                sender=email["sender"],
+                subject=email["subject"],
                 ml_confidence=ml_result.confidence,
                 url_risk_score=url_risk,
                 final_risk_score=final_risk,
                 severity=severity,
                 timestamp=timestamp,
-                email_snippet=email.get('snippet'),
-                urls_found=','.join(urls) if urls else None,
+                email_snippet=email.get("snippet"),
+                urls_found=",".join(urls) if urls else None,
             )
-            
+
+            deleted = False
+            if severity == "CRITICAL":
+                try:
+                    gmail_service.move_to_trash(email["id"])
+                    deleted = True
+                except Exception as tr:
+                    logger.warning("Could not move message %s to Trash: %s", email["id"], tr)
+
             results.append({
-                "detection_id": detection_id,
-                "subject": email['subject'],
-                "sender": email['sender'],
-                "severity": severity,
-                "final_risk_score": final_risk,
+                "id": email["id"],
+                "subject": email["subject"],
+                "sender": email["sender"],
+                "date": timestamp,
+                "text": email.get("snippet", ""),
+                "prediction": ml_result.prediction,
+                "risk": risk,
+                "deleted": deleted,
             })
-        
+
         return {
             "user_email": user_email,
             "emails_analyzed": len(results),

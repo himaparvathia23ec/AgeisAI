@@ -34,7 +34,7 @@ import {
   Ban
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
-import { loginWithGoogleIdToken, getGmailAuthUrl, exchangeGmailCode, claimGmailState, fetchAndAnalyzeEmails, getDashboardData, getRecentIncidents, getEmailsInBin, analyzeContent, type UserInfo, type TokenData, type DashboardData, type Incident, type AnalyzeResult } from './api';
+import { loginWithGoogleIdToken, getGmailAuthUrl, exchangeGmailCode, claimGmailState, fetchAndAnalyzeEmails, getDashboardData, getRecentIncidents, getEmailsInBin, analyzeContent, type UserInfo, type TokenData, type DashboardData, type Incident, type AnalyzeResult, type EmailResult, type FetchEmailsResponse } from './api';
 
 declare global {
   interface Window {
@@ -306,6 +306,7 @@ const SEVERITY_STYLES: Record<string, { bg: string; text: string; border: string
 const Dashboard = ({ userInfo, tokenData, onConnectGmail, connectGmailError, gmailExchangeError, onDismissConnectError }: { userInfo: UserInfo; tokenData: TokenData | null; onConnectGmail: () => void; connectGmailError?: string | null; gmailExchangeError?: string | null; onDismissConnectError?: () => void }) => {
   const [selectedIncident, setSelectedIncident] = useState<IncidentDisplay | null>(null);
   const [sidebarView, setSidebarView] = useState<SidebarView>('home');
+  const [userEmail, setUserEmail] = useState("");
   const [dashboardData, setDashboardData] = useState<DashboardData | null>(null);
   const [incidents, setIncidents] = useState<IncidentDisplay[]>([]);
   const [emailsInBin, setEmailsInBin] = useState<Incident[]>([]);
@@ -317,6 +318,8 @@ const Dashboard = ({ userInfo, tokenData, onConnectGmail, connectGmailError, gma
   const [analyzeError, setAnalyzeError] = useState<string | null>(null);
   const [scanError, setScanError] = useState<string | null>(null);
   const [dashboardError, setDashboardError] = useState<string | null>(null);
+  const [emailList, setEmailList] = useState<EmailResult[]>([]);
+  const [stats, setStats] = useState<{ scanned: number; threats: number; safe: number } | null>(null);
 
   const loadDashboardData = async () => {
     setDashboardError(null);
@@ -358,7 +361,13 @@ const Dashboard = ({ userInfo, tokenData, onConnectGmail, connectGmailError, gma
     }
     setRefreshing(true);
     try {
-      await fetchAndAnalyzeEmails(tokenData, 50);
+      const data: FetchEmailsResponse = await fetchAndAnalyzeEmails(tokenData, 50);
+      if (data.user_email) setUserEmail(data.user_email);
+      const list = data.results ?? [];
+      setEmailList(list);
+      const threats = list.filter((e) => e.risk === 'high' || e.risk === 'medium').length;
+      const safe = list.filter((e) => e.risk === 'low').length;
+      setStats({ scanned: list.length, threats, safe });
       await loadDashboardData();
       if (sidebarView === 'emails-bin') {
         await loadEmailsInBin();
@@ -375,6 +384,12 @@ const Dashboard = ({ userInfo, tokenData, onConnectGmail, connectGmailError, gma
     setLoading(true);
     loadDashboardData();
   }, [userInfo.email]);
+
+  /** Auto-run Gmail scan when dashboard loads with Gmail connected (or when tokenData is set after Connect Gmail) */
+  useEffect(() => {
+    if (!tokenData?.token) return;
+    handleQuickScan();
+  }, [tokenData?.token]);
 
   useEffect(() => {
     if (sidebarView === 'emails-bin') {
@@ -413,11 +428,20 @@ const Dashboard = ({ userInfo, tokenData, onConnectGmail, connectGmailError, gma
   };
 
   const getThreatLevel = () => {
+    if (stats && stats.scanned > 0) {
+      return Math.min(100, Math.round((stats.threats / stats.scanned) * 100));
+    }
     if (!dashboardData) return 0;
     const total = dashboardData.total_scanned;
     if (total === 0) return 0;
     const threats = dashboardData.total_phishing;
     return Math.min(100, Math.round((threats / total) * 100));
+  };
+
+  const displayStats = {
+    scanned: stats?.scanned ?? dashboardData?.total_scanned ?? 0,
+    threats: stats?.threats ?? dashboardData?.total_phishing ?? 0,
+    safe: stats ? stats.safe : (dashboardData ? dashboardData.total_scanned - dashboardData.total_phishing : 0),
   };
 
   const renderContent = () => {
@@ -453,38 +477,48 @@ const Dashboard = ({ userInfo, tokenData, onConnectGmail, connectGmailError, gma
     }
 
     if (sidebarView === 'emails-bin') {
+      const deletedFromScan = emailList.filter((e) => e.deleted);
+      const hasDeleted = deletedFromScan.length > 0;
+      const hasLegacyBin = emailsInBin.length > 0;
       return (
         <div className="p-8">
           <h2 className="text-2xl font-bold mb-6">Emails in Bin</h2>
-          <div className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden">
-            <div className="overflow-x-auto">
-              <table className="w-full text-left">
-                <thead className="bg-slate-800/50 text-xs font-bold uppercase text-slate-500">
-                  <tr>
-                    <th className="px-6 py-4">Timestamp</th>
-                    <th className="px-6 py-4">Sender</th>
-                    <th className="px-6 py-4">Subject</th>
-                    <th className="px-6 py-4">Severity</th>
-                    <th className="px-6 py-4">Risk Score</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-800 text-sm">
-                  {emailsInBin.length === 0 ? (
+          {hasDeleted ? (
+            <div className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden divide-y divide-slate-800">
+              {deletedFromScan.map((email) => (
+                <div key={email.id} className="px-6 py-4 hover:bg-slate-800/30 transition-colors">
+                  <div className="font-medium">{email.subject}</div>
+                  <div className="text-sm text-slate-500">{email.sender}</div>
+                  <div className="text-xs text-red-400 mt-1 flex items-center gap-1">
+                    <Trash2 className="size-3.5" /> Moved to Trash
+                  </div>
+                </div>
+              ))}
+            </div>
+          ) : null}
+          {!hasDeleted && hasLegacyBin && (
+            <div className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden">
+              <div className="overflow-x-auto">
+                <table className="w-full text-left">
+                  <thead className="bg-slate-800/50 text-xs font-bold uppercase text-slate-500">
                     <tr>
-                      <td colSpan={5} className="px-6 py-8 text-center text-slate-400">
-                        No threats detected in your emails yet.
-                      </td>
+                      <th className="px-6 py-4">Timestamp</th>
+                      <th className="px-6 py-4">Sender</th>
+                      <th className="px-6 py-4">Subject</th>
+                      <th className="px-6 py-4">Severity</th>
+                      <th className="px-6 py-4">Risk Score</th>
                     </tr>
-                  ) : (
-                    emailsInBin.map((email) => (
+                  </thead>
+                  <tbody className="divide-y divide-slate-800 text-sm">
+                    {emailsInBin.map((email) => (
                       <tr key={email.id} className="hover:bg-slate-800/30 transition-colors">
                         <td className="px-6 py-4 whitespace-nowrap text-slate-500">{formatTimestamp(email.timestamp)}</td>
                         <td className="px-6 py-4">{email.sender}</td>
                         <td className="px-6 py-4">{email.subject}</td>
                         <td className="px-6 py-4">
                           <span className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-bold ${
-                            email.severity === 'CRITICAL' ? 'bg-red-500/10 text-red-500' : 
-                            email.severity === 'WARNING' ? 'bg-amber-500/10 text-amber-500' : 
+                            email.severity === 'CRITICAL' ? 'bg-red-500/10 text-red-500' :
+                            email.severity === 'WARNING' ? 'bg-amber-500/10 text-amber-500' :
                             'bg-slate-800 text-slate-400'
                           }`}>
                             {email.severity}
@@ -492,12 +526,17 @@ const Dashboard = ({ userInfo, tokenData, onConnectGmail, connectGmailError, gma
                         </td>
                         <td className="px-6 py-4">{Math.round(email.risk_score * 100)}%</td>
                       </tr>
-                    ))
-                  )}
-                </tbody>
-              </table>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
             </div>
-          </div>
+          )}
+          {!hasDeleted && !hasLegacyBin && (
+            <div className="bg-slate-900 border border-slate-800 rounded-xl px-6 py-8 text-center text-slate-400">
+              No emails moved to Trash yet. High-risk emails from Quick Scan are moved automatically.
+            </div>
+          )}
         </div>
       );
     }
@@ -601,9 +640,9 @@ const Dashboard = ({ userInfo, tokenData, onConnectGmail, connectGmailError, gma
               <span className="text-xs font-bold text-slate-400">Live</span>
             </div>
             <h3 className="text-slate-400 text-sm font-medium">Active Threats</h3>
-            <p className="text-3xl font-bold mt-1">{dashboardData.total_phishing}</p>
+            <p className="text-3xl font-bold mt-1">{displayStats.threats}</p>
             <p className="text-xs text-slate-400 mt-4 flex items-center gap-1">
-              <Bolt className="size-3" /> Updated just now
+              <Bolt className="size-3" /> {stats ? 'From last scan' : 'Updated just now'}
             </p>
           </div>
           {/* Scanned Emails */}
@@ -613,19 +652,17 @@ const Dashboard = ({ userInfo, tokenData, onConnectGmail, connectGmailError, gma
               <span className="text-xs font-bold text-primary">Total</span>
             </div>
             <h3 className="text-slate-400 text-sm font-medium">Scanned Emails</h3>
-            <p className="text-3xl font-bold mt-1">{dashboardData.total_scanned.toLocaleString()}</p>
-            <p className="text-xs text-slate-400 mt-4">All time</p>
+            <p className="text-3xl font-bold mt-1">{displayStats.scanned.toLocaleString()}</p>
+            <p className="text-xs text-slate-400 mt-4">{stats ? 'From last scan' : 'All time'}</p>
           </div>
           {/* Protected Emails */}
           <div className="bg-slate-900 border border-slate-800 p-6 rounded-xl">
             <div className="flex justify-between items-start mb-4">
               <span className="p-2 bg-emerald-500/10 text-emerald-500 rounded-lg"><ShieldCheck className="size-5" /></span>
-              <span className="text-xs font-bold text-emerald-500">
-                {dashboardData.total_scanned - dashboardData.total_phishing}
-              </span>
+              <span className="text-xs font-bold text-emerald-500">{displayStats.safe}</span>
             </div>
             <h3 className="text-slate-400 text-sm font-medium">Safe Emails</h3>
-            <p className="text-3xl font-bold mt-1">{(dashboardData.total_scanned - dashboardData.total_phishing).toLocaleString()}</p>
+            <p className="text-3xl font-bold mt-1">{displayStats.safe.toLocaleString()}</p>
             <p className="text-xs text-slate-400 mt-4">Protected</p>
           </div>
         </div>
@@ -712,6 +749,39 @@ const Dashboard = ({ userInfo, tokenData, onConnectGmail, connectGmailError, gma
             </div>
           </div>
         </div>
+
+        {/* Scanned Email List (dynamic from last Quick Scan) */}
+        {emailList.length > 0 && (
+          <div className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden">
+            <div className="p-6 border-b border-slate-800">
+              <h3 className="text-lg font-bold">Scanned Emails</h3>
+              <p className="text-sm text-slate-400 mt-1">From last Quick Scan — risk level per email</p>
+            </div>
+            <div className="divide-y divide-slate-800">
+              {emailList.map((email) => (
+                <div key={email.id} className="flex items-center justify-between px-6 py-4 hover:bg-slate-800/30 transition-colors email-row">
+                  <div className="min-w-0 flex-1">
+                    <div className="font-medium truncate">{email.subject}</div>
+                    <div className="text-sm text-slate-500 truncate">{email.sender}</div>
+                    <div className="text-xs text-slate-500 mt-0.5">{new Date(email.date).toLocaleString()}</div>
+                    {email.deleted && (
+                      <div className="text-xs text-red-400 mt-1 flex items-center gap-1">
+                        <Trash2 className="size-3.5" /> Moved to Trash
+                      </div>
+                    )}
+                  </div>
+                  <span className={`shrink-0 ml-4 px-2.5 py-0.5 rounded-full text-xs font-bold risk-${email.risk} ${
+                    email.risk === 'high' ? 'bg-red-500/10 text-red-500' :
+                    email.risk === 'medium' ? 'bg-amber-500/10 text-amber-500' :
+                    'bg-slate-700 text-slate-300'
+                  }`}>
+                    {email.risk.toUpperCase()}
+                  </span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
 
         {/* Recent Incidents Table */}
         <div className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden">
@@ -859,8 +929,8 @@ const Dashboard = ({ userInfo, tokenData, onConnectGmail, connectGmailError, gma
                 src={userInfo.picture || 'https://via.placeholder.com/40'} 
               />
               <div className="overflow-hidden">
-                <p className="text-sm font-bold truncate">{userInfo.name || 'User'}</p>
-                <p className="text-xs text-slate-400 truncate">{userInfo.email}</p>
+                <p className="text-sm font-bold truncate">{userEmail || 'Loading...'}</p>
+                <p className="text-xs text-slate-400 truncate">Connected Gmail</p>
               </div>
             </div>
           </div>
@@ -1070,6 +1140,7 @@ export default function App() {
   useEffect(() => {
     const storedUserInfo = localStorage.getItem('userInfo');
     const storedTokenData = localStorage.getItem('tokenData');
+    const hasTokenInUrl = new URLSearchParams(window.location.search).get('token') != null;
     if (storedUserInfo) {
       try {
         const parsed = JSON.parse(storedUserInfo) as UserInfo;
@@ -1082,7 +1153,8 @@ export default function App() {
               localStorage.removeItem('tokenData');
             }
           }
-          setView('dashboard');
+          // Do not force dashboard when URL has ?token= (Gmail callback → show onboarding)
+          if (!hasTokenInUrl) setView('dashboard');
         } else {
           localStorage.removeItem('userInfo');
           localStorage.removeItem('tokenData');
@@ -1100,6 +1172,28 @@ export default function App() {
       setView('landing');
     }
   }, [view, userInfo]);
+
+  // Gmail callback redirect: ?token=ENCODED (base64url JSON of token_data) — decode, store, clean URL, show onboarding
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const tokenEncoded = params.get('token');
+    if (!tokenEncoded) return;
+    try {
+      const base64 = tokenEncoded.replace(/-/g, '+').replace(/_/g, '/');
+      const pad = base64.length % 4;
+      const padded = pad ? base64 + '='.repeat(4 - pad) : base64;
+      const decoded = JSON.parse(atob(padded)) as TokenData;
+      if (decoded?.token && decoded?.client_id && decoded?.token_uri) {
+        setTokenData(decoded);
+        localStorage.setItem('tokenData', JSON.stringify(decoded));
+      }
+      const path = window.location.pathname || '/';
+      window.history.replaceState({}, document.title, path);
+      setView('onboarding');
+    } catch (_e) {
+      setGmailExchangeError('Invalid token from Gmail callback.');
+    }
+  }, []);
 
   // Gmail connect: backend redirects to frontend with #gmail-state=STATE; claim token_data from backend
   const gmailClaimAttempted = React.useRef(false);

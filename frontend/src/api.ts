@@ -45,6 +45,25 @@ export interface Incident {
   snippet?: string;
 }
 
+/** Single email from fetch-emails scan (subject, sender, date, risk, deleted). */
+export interface EmailResult {
+  id: string;
+  subject: string;
+  sender: string;
+  date: string;
+  text: string;
+  prediction: number;
+  risk: string;
+  deleted: boolean;
+}
+
+/** Response from POST /auth/fetch-emails */
+export interface FetchEmailsResponse {
+  user_email: string;
+  emails_analyzed: number;
+  results: EmailResult[];
+}
+
 /** Response from POST /analyze */
 export interface AnalyzeResult {
   prediction: number;
@@ -112,7 +131,7 @@ export async function claimGmailState(state: string): Promise<{ success: boolean
   return data;
 }
 
-export async function fetchAndAnalyzeEmails(tokenData: TokenData, maxResults: number = 50): Promise<unknown> {
+export async function fetchAndAnalyzeEmails(tokenData: TokenData, maxResults: number = 50): Promise<FetchEmailsResponse> {
   const response = await fetch(`${API_BASE_URL}/auth/fetch-emails?max_results=${maxResults}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -120,7 +139,7 @@ export async function fetchAndAnalyzeEmails(tokenData: TokenData, maxResults: nu
   });
   const data = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(data.detail || data.details || data.error || 'Failed to fetch and analyze emails');
-  return data;
+  return data as FetchEmailsResponse;
 }
 
 export async function getDashboardData(userEmail: string): Promise<DashboardData> {
