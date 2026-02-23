@@ -35,6 +35,7 @@ import {
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { getGmailAuthUrl, exchangeGmailCode, claimGmailState, fetchAndAnalyzeEmails, getDashboardData, getRecentIncidents, getEmailsInBin, analyzeContent, type UserInfo, type TokenData, type DashboardData, type Incident, type AnalyzeResult, type EmailResult, type FetchEmailsResponse } from './api';
+import Threats from './Threats';
 
 // --- Types ---
 
@@ -70,7 +71,10 @@ const LandingPage = () => {
       window.location.href = data.auth_url;
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Login failed. Please try again.';
-      setLoginError(msg);
+      const isNetworkError = msg === 'Failed to fetch' || (err instanceof TypeError && (err as TypeError).message === 'Failed to fetch');
+      setLoginError(isNetworkError
+        ? `Cannot reach server. Is the backend running at ${API_URL}? Start it with: cd backend && uvicorn main:app --reload --port 8000`
+        : msg);
     } finally {
       setLoading(false);
     }
@@ -289,9 +293,10 @@ const SEVERITY_STYLES: Record<string, { bg: string; text: string; border: string
 };
 
 const Dashboard = ({ userInfo, tokenData, onConnectGmail, connectGmailError, gmailExchangeError, onDismissConnectError }: { userInfo: UserInfo; tokenData: TokenData | null; onConnectGmail: () => void; connectGmailError?: string | null; gmailExchangeError?: string | null; onDismissConnectError?: () => void }) => {
+  const [page, setPage] = useState<'home' | 'threats'>('home');
   const [selectedIncident, setSelectedIncident] = useState<IncidentDisplay | null>(null);
   const [sidebarView, setSidebarView] = useState<SidebarView>('home');
-  const [userEmail, setUserEmail] = useState("");
+  const [userEmail, setUserEmail] = useState('');
   const [dashboardData, setDashboardData] = useState<DashboardData | null>(null);
   const [incidents, setIncidents] = useState<IncidentDisplay[]>([]);
   const [emailsInBin, setEmailsInBin] = useState<Incident[]>([]);
@@ -308,19 +313,28 @@ const Dashboard = ({ userInfo, tokenData, onConnectGmail, connectGmailError, gma
 
   const loadDashboardData = async () => {
     setDashboardError(null);
+    const email = userInfo?.email;
+    if (!email) return;
     try {
-      const data = await getDashboardData(userInfo.email);
+      const data = await getDashboardData(email);
       setDashboardData(data);
       
-      // Convert incidents to display format (defensive: ensure array)
+      // Convert incidents to display format; deduplicate by (sender, subject) so each threat shows once
       const incidentsList = Array.isArray(data?.recent_incidents) ? data.recent_incidents : [];
-      const displayIncidents: IncidentDisplay[] = incidentsList.map((inc: Incident) => ({
-        ...inc,
-        source: inc.subject,
-        sourceDetail: inc.sender,
-        category: inc.severity === 'CRITICAL' ? 'Phishing' : inc.severity === 'WARNING' ? 'Suspicious' : 'Low Risk',
-        type: 'mail' as const,
-      }));
+      const seen = new Set<string>();
+      const displayIncidents: IncidentDisplay[] = [];
+      for (const inc of incidentsList) {
+        const key = `${inc?.sender ?? ''}|${inc?.subject ?? ''}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        displayIncidents.push({
+          ...inc,
+          source: inc.subject,
+          sourceDetail: inc.sender,
+          category: inc.severity === 'CRITICAL' ? 'Phishing' : inc.severity === 'WARNING' ? 'Suspicious' : 'Low Risk',
+          type: 'mail' as const,
+        });
+      }
       setIncidents(displayIncidents);
     } catch (error) {
       setDashboardError(error instanceof Error ? error.message : 'Failed to load dashboard. Check that the backend is running.');
@@ -330,8 +344,10 @@ const Dashboard = ({ userInfo, tokenData, onConnectGmail, connectGmailError, gma
   };
 
   const loadEmailsInBin = async () => {
+    const email = userInfo?.email;
+    if (!email) return;
     try {
-      const data = await getEmailsInBin(userInfo.email);
+      const data = await getEmailsInBin(email);
       setEmailsInBin(data.emails);
     } catch (_error) {
       // Error loading emails in bin; leave emailsInBin empty
@@ -350,8 +366,8 @@ const Dashboard = ({ userInfo, tokenData, onConnectGmail, connectGmailError, gma
       if (data.user_email) setUserEmail(data.user_email);
       const list = data.results ?? [];
       setEmailList(list);
-      const threats = list.filter((e) => e.risk === 'high' || e.risk === 'medium').length;
-      const safe = list.filter((e) => e.risk === 'low').length;
+      const threats = list.filter((e) => (e?.risk ?? '') === 'high' || (e?.risk ?? '') === 'medium').length;
+      const safe = list.filter((e) => (e?.risk ?? 'low') === 'low').length;
       setStats({ scanned: list.length, threats, safe });
       await loadDashboardData();
       if (sidebarView === 'emails-bin') {
@@ -368,7 +384,7 @@ const Dashboard = ({ userInfo, tokenData, onConnectGmail, connectGmailError, gma
   useEffect(() => {
     setLoading(true);
     loadDashboardData();
-  }, [userInfo.email]);
+  }, [userInfo?.email]);
 
   /** Auto-run Gmail scan when dashboard loads with Gmail connected (or when tokenData is set after Connect Gmail) */
   useEffect(() => {
@@ -380,7 +396,7 @@ const Dashboard = ({ userInfo, tokenData, onConnectGmail, connectGmailError, gma
     if (sidebarView === 'emails-bin') {
       loadEmailsInBin();
     }
-  }, [sidebarView, userInfo.email]);
+  }, [sidebarView, userInfo?.email]);
 
   const handleAnalyze = async () => {
     setAnalyzeError(null);
@@ -398,6 +414,7 @@ const Dashboard = ({ userInfo, tokenData, onConnectGmail, connectGmailError, gma
   };
 
   const formatTimestamp = (timestamp: string) => {
+    if (timestamp == null || typeof timestamp !== 'string') return '—';
     try {
       const date = new Date(timestamp);
       return date.toLocaleString('en-US', { 
@@ -417,9 +434,9 @@ const Dashboard = ({ userInfo, tokenData, onConnectGmail, connectGmailError, gma
       return Math.min(100, Math.round((stats.threats / stats.scanned) * 100));
     }
     if (!dashboardData) return 0;
-    const total = dashboardData.total_scanned;
+    const total = dashboardData?.total_scanned ?? 0;
     if (total === 0) return 0;
-    const threats = dashboardData.total_phishing;
+    const threats = dashboardData?.total_phishing ?? 0;
     return Math.min(100, Math.round((threats / total) * 100));
   };
 
@@ -471,9 +488,9 @@ const Dashboard = ({ userInfo, tokenData, onConnectGmail, connectGmailError, gma
           {hasDeleted ? (
             <div className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden divide-y divide-slate-800">
               {deletedFromScan.map((email) => (
-                <div key={email.id} className="px-6 py-4 hover:bg-slate-800/30 transition-colors">
-                  <div className="font-medium">{email.subject}</div>
-                  <div className="text-sm text-slate-500">{email.sender}</div>
+                <div key={email?.id ?? ''} className="px-6 py-4 hover:bg-slate-800/30 transition-colors">
+                  <div className="font-medium">{email?.subject ?? '—'}</div>
+                  <div className="text-sm text-slate-500">{email?.sender ?? '—'}</div>
                   <div className="text-xs text-red-400 mt-1 flex items-center gap-1">
                     <Trash2 className="size-3.5" /> Moved to Trash
                   </div>
@@ -496,20 +513,20 @@ const Dashboard = ({ userInfo, tokenData, onConnectGmail, connectGmailError, gma
                   </thead>
                   <tbody className="divide-y divide-slate-800 text-sm">
                     {emailsInBin.map((email) => (
-                      <tr key={email.id} className="hover:bg-slate-800/30 transition-colors">
-                        <td className="px-6 py-4 whitespace-nowrap text-slate-500">{formatTimestamp(email.timestamp)}</td>
-                        <td className="px-6 py-4">{email.sender}</td>
-                        <td className="px-6 py-4">{email.subject}</td>
+                      <tr key={email?.id ?? ''} className="hover:bg-slate-800/30 transition-colors">
+                        <td className="px-6 py-4 whitespace-nowrap text-slate-500">{formatTimestamp(email?.timestamp ?? '')}</td>
+                        <td className="px-6 py-4">{email?.sender ?? '—'}</td>
+                        <td className="px-6 py-4">{email?.subject ?? '—'}</td>
                         <td className="px-6 py-4">
                           <span className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-bold ${
-                            email.severity === 'CRITICAL' ? 'bg-red-500/10 text-red-500' :
-                            email.severity === 'WARNING' ? 'bg-amber-500/10 text-amber-500' :
+                            (email?.severity ?? '') === 'CRITICAL' ? 'bg-red-500/10 text-red-500' :
+                            (email?.severity ?? '') === 'WARNING' ? 'bg-amber-500/10 text-amber-500' :
                             'bg-slate-800 text-slate-400'
                           }`}>
-                            {email.severity}
+                            {email?.severity ?? '—'}
                           </span>
                         </td>
-                        <td className="px-6 py-4">{Math.round(email.risk_score * 100)}%</td>
+                        <td className="px-6 py-4">{Math.round((email?.risk_score ?? 0) * 100)}%</td>
                       </tr>
                     ))}
                   </tbody>
@@ -527,7 +544,8 @@ const Dashboard = ({ userInfo, tokenData, onConnectGmail, connectGmailError, gma
     }
 
     if (sidebarView === 'analysis') {
-      const severityStyle = analyzeResult ? SEVERITY_STYLES[analyzeResult.severity] ?? SEVERITY_STYLES.LOW : null;
+      const severityKey = String(analyzeResult?.severity ?? 'LOW').toUpperCase();
+      const severityStyle = analyzeResult ? (SEVERITY_STYLES[severityKey] ?? SEVERITY_STYLES.LOW) : null;
       return (
         <div className="p-8 max-w-3xl mx-auto space-y-6">
           <h2 className="text-2xl font-bold">Analyze content</h2>
@@ -574,7 +592,7 @@ const Dashboard = ({ userInfo, tokenData, onConnectGmail, connectGmailError, gma
                   <p className="font-medium">{analyzeResult.risk_level}</p>
                 </div>
               </div>
-              {analyzeResult.suspicious_words.length > 0 && (
+              {Array.isArray(analyzeResult.suspicious_words) && analyzeResult.suspicious_words.length > 0 && (
                 <div className="mt-4 pt-4 border-t border-slate-700">
                   <span className="text-slate-500 text-sm">Suspicious keywords: </span>
                   <span className="text-amber-400 font-medium">{analyzeResult.suspicious_words.join(', ')}</span>
@@ -598,8 +616,8 @@ const Dashboard = ({ userInfo, tokenData, onConnectGmail, connectGmailError, gma
       <div className="p-8 space-y-8">
         {/* Welcome Message */}
         <div className="mb-6">
-          <h1 className="text-3xl font-bold mb-2">Welcome, {userInfo.name?.split(' ')[0] || 'User'}</h1>
-          <p className="text-slate-400">{userInfo.email}</p>
+          <h1 className="text-3xl font-bold mb-2">Welcome, {(userInfo?.name ?? '').split(' ')[0] || 'User'}</h1>
+          <p className="text-slate-400">{userInfo?.email ?? ''}</p>
         </div>
 
         {/* KPI Cards */}
@@ -609,7 +627,7 @@ const Dashboard = ({ userInfo, tokenData, onConnectGmail, connectGmailError, gma
             <div className="flex justify-between items-start mb-4">
               <span className="p-2 bg-red-500/10 text-red-500 rounded-lg"><ShieldAlert className="size-5" /></span>
               <span className="text-xs font-bold text-red-500">
-                {dashboardData.total_phishing > 0 ? `+${dashboardData.total_phishing}` : '0'}
+                {(dashboardData?.total_phishing ?? 0) > 0 ? `+${dashboardData?.total_phishing}` : '0'}
               </span>
             </div>
             <h3 className="text-slate-400 text-sm font-medium">System Threat Level</h3>
@@ -670,10 +688,11 @@ const Dashboard = ({ userInfo, tokenData, onConnectGmail, connectGmailError, gma
                 ))}
               </div>
               <div className="w-full flex items-end justify-around gap-4 h-48 relative z-0">
-                {dashboardData.weekly_trend.length > 0 ? (
-                  dashboardData.weekly_trend.map((day, i) => {
-                    const maxCount = Math.max(...dashboardData.weekly_trend.map(d => d.count), 1);
-                    const height = (day.count / maxCount) * 100;
+                {(dashboardData?.weekly_trend?.length ?? 0) > 0 ? (
+                  (dashboardData?.weekly_trend ?? []).map((day, i) => {
+                    const trend = dashboardData?.weekly_trend ?? [];
+                    const maxCount = Math.max(...trend.map(d => d?.count ?? 0), 1);
+                    const height = ((day?.count ?? 0) / maxCount) * 100;
                     return (
                       <div key={i} className="w-full bg-primary/20 rounded-t-lg relative group" style={{ height: `${Math.max(height, 5)}%` }}>
                         <motion.div 
@@ -690,9 +709,9 @@ const Dashboard = ({ userInfo, tokenData, onConnectGmail, connectGmailError, gma
               </div>
             </div>
             <div className="flex justify-between mt-4 text-xs font-bold text-slate-500 uppercase tracking-tighter">
-              {dashboardData.weekly_trend.length > 0 ? (
-                dashboardData.weekly_trend.map((day, i) => (
-                  <span key={i}>{new Date(day.date).toLocaleDateString('en-US', { weekday: 'short' })}</span>
+              {(dashboardData?.weekly_trend?.length ?? 0) > 0 ? (
+                (dashboardData?.weekly_trend ?? []).map((day, i) => (
+                  <span key={i}>{day?.date ? new Date(day.date).toLocaleDateString('en-US', { weekday: 'short' }) : '—'}</span>
                 ))
               ) : (
                 <span>No data</span>
@@ -707,28 +726,28 @@ const Dashboard = ({ userInfo, tokenData, onConnectGmail, connectGmailError, gma
               <div>
                 <div className="flex justify-between items-center mb-2">
                   <span className="text-sm font-medium text-slate-400">CRITICAL</span>
-                  <span className="text-sm font-bold text-red-500">{dashboardData.severity_counts.CRITICAL}</span>
+                  <span className="text-sm font-bold text-red-500">{dashboardData?.severity_counts?.CRITICAL ?? 0}</span>
                 </div>
                 <div className="h-2 w-full bg-slate-800 rounded-full overflow-hidden">
-                  <div className="h-full bg-red-500 rounded-full" style={{ width: `${dashboardData.total_scanned > 0 ? (dashboardData.severity_counts.CRITICAL / dashboardData.total_scanned) * 100 : 0}%` }}></div>
+                  <div className="h-full bg-red-500 rounded-full" style={{ width: `${(dashboardData?.total_scanned ?? 0) > 0 ? ((dashboardData?.severity_counts?.CRITICAL ?? 0) / (dashboardData?.total_scanned ?? 1)) * 100 : 0}%` }}></div>
                 </div>
               </div>
               <div>
                 <div className="flex justify-between items-center mb-2">
                   <span className="text-sm font-medium text-slate-400">WARNING</span>
-                  <span className="text-sm font-bold text-amber-500">{dashboardData.severity_counts.WARNING}</span>
+                  <span className="text-sm font-bold text-amber-500">{dashboardData?.severity_counts?.WARNING ?? 0}</span>
                 </div>
                 <div className="h-2 w-full bg-slate-800 rounded-full overflow-hidden">
-                  <div className="h-full bg-amber-500 rounded-full" style={{ width: `${dashboardData.total_scanned > 0 ? (dashboardData.severity_counts.WARNING / dashboardData.total_scanned) * 100 : 0}%` }}></div>
+                  <div className="h-full bg-amber-500 rounded-full" style={{ width: `${(dashboardData?.total_scanned ?? 0) > 0 ? ((dashboardData?.severity_counts?.WARNING ?? 0) / (dashboardData?.total_scanned ?? 1)) * 100 : 0}%` }}></div>
                 </div>
               </div>
               <div>
                 <div className="flex justify-between items-center mb-2">
                   <span className="text-sm font-medium text-slate-400">LOW</span>
-                  <span className="text-sm font-bold text-slate-400">{dashboardData.severity_counts.LOW}</span>
+                  <span className="text-sm font-bold text-slate-400">{dashboardData?.severity_counts?.LOW ?? 0}</span>
                 </div>
                 <div className="h-2 w-full bg-slate-800 rounded-full overflow-hidden">
-                  <div className="h-full bg-slate-400 rounded-full" style={{ width: `${dashboardData.total_scanned > 0 ? (dashboardData.severity_counts.LOW / dashboardData.total_scanned) * 100 : 0}%` }}></div>
+                  <div className="h-full bg-slate-400 rounded-full" style={{ width: `${(dashboardData?.total_scanned ?? 0) > 0 ? ((dashboardData?.severity_counts?.LOW ?? 0) / (dashboardData?.total_scanned ?? 1)) * 100 : 0}%` }}></div>
                 </div>
               </div>
             </div>
@@ -744,23 +763,23 @@ const Dashboard = ({ userInfo, tokenData, onConnectGmail, connectGmailError, gma
             </div>
             <div className="divide-y divide-slate-800">
               {emailList.map((email) => (
-                <div key={email.id} className="flex items-center justify-between px-6 py-4 hover:bg-slate-800/30 transition-colors email-row">
+                <div key={email?.id ?? ''} className="flex items-center justify-between px-6 py-4 hover:bg-slate-800/30 transition-colors email-row">
                   <div className="min-w-0 flex-1">
-                    <div className="font-medium truncate">{email.subject}</div>
-                    <div className="text-sm text-slate-500 truncate">{email.sender}</div>
-                    <div className="text-xs text-slate-500 mt-0.5">{new Date(email.date).toLocaleString()}</div>
+                    <div className="font-medium truncate">{email?.subject ?? '—'}</div>
+                    <div className="text-sm text-slate-500 truncate">{email?.sender ?? '—'}</div>
+                    <div className="text-xs text-slate-500 mt-0.5">{email?.date ? new Date(email.date).toLocaleString() : '—'}</div>
                     {email.deleted && (
                       <div className="text-xs text-red-400 mt-1 flex items-center gap-1">
                         <Trash2 className="size-3.5" /> Moved to Trash
                       </div>
                     )}
                   </div>
-                  <span className={`shrink-0 ml-4 px-2.5 py-0.5 rounded-full text-xs font-bold risk-${email.risk} ${
-                    email.risk === 'high' ? 'bg-red-500/10 text-red-500' :
-                    email.risk === 'medium' ? 'bg-amber-500/10 text-amber-500' :
+                  <span className={`shrink-0 ml-4 px-2.5 py-0.5 rounded-full text-xs font-bold risk-${email?.risk ?? 'low'} ${
+                    (email?.risk ?? '') === 'high' ? 'bg-red-500/10 text-red-500' :
+                    (email?.risk ?? '') === 'medium' ? 'bg-amber-500/10 text-amber-500' :
                     'bg-slate-700 text-slate-300'
                   }`}>
-                    {email.risk.toUpperCase()}
+                    {String(email?.risk ?? 'low').toUpperCase()}
                   </span>
                 </div>
               ))}
@@ -798,30 +817,30 @@ const Dashboard = ({ userInfo, tokenData, onConnectGmail, connectGmailError, gma
                   </tr>
                 ) : (
                   incidents.map((incident) => (
-                    <tr key={incident.id} className="hover:bg-slate-800/30 transition-colors">
-                      <td className="px-6 py-4 whitespace-nowrap text-slate-500">{formatTimestamp(incident.timestamp)}</td>
+                    <tr key={incident?.id ?? ''} className="hover:bg-slate-800/30 transition-colors">
+                      <td className="px-6 py-4 whitespace-nowrap text-slate-500">{formatTimestamp(incident?.timestamp ?? '')}</td>
                       <td className="px-6 py-4">
                         <div className="flex items-center gap-3">
                           <Mail className="size-4 text-slate-400" />
                           <div>
-                            <p className="font-medium">{incident.source}</p>
-                            <p className="text-xs text-slate-500">{incident.sourceDetail}</p>
+                            <p className="font-medium">{incident?.source ?? incident?.subject ?? '—'}</p>
+                            <p className="text-xs text-slate-500">{incident?.sourceDetail ?? incident?.sender ?? '—'}</p>
                           </div>
                         </div>
                       </td>
-                      <td className="px-6 py-4"><span className="bg-slate-800 px-2 py-1 rounded text-[11px] font-bold">{incident.category}</span></td>
+                      <td className="px-6 py-4"><span className="bg-slate-800 px-2 py-1 rounded text-[11px] font-bold">{incident?.category ?? 'Mail'}</span></td>
                       <td className="px-6 py-4">
                         <span className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-bold ${
-                          incident.severity === 'CRITICAL' ? 'bg-red-500/10 text-red-500' : 
-                          incident.severity === 'WARNING' ? 'bg-amber-500/10 text-amber-500' : 
+                          (incident?.severity ?? '') === 'CRITICAL' ? 'bg-red-500/10 text-red-500' :
+                          (incident?.severity ?? '') === 'WARNING' ? 'bg-amber-500/10 text-amber-500' :
                           'bg-slate-800 text-slate-400'
                         }`}>
                           <span className={`w-1.5 h-1.5 rounded-full ${
-                            incident.severity === 'CRITICAL' ? 'bg-red-500' : 
-                            incident.severity === 'WARNING' ? 'bg-amber-500' : 
+                            (incident?.severity ?? '') === 'CRITICAL' ? 'bg-red-500' :
+                            (incident?.severity ?? '') === 'WARNING' ? 'bg-amber-500' :
                             'bg-slate-400'
                           }`}></span>
-                          {incident.severity}
+                          {incident?.severity ?? 'LOW'}
                         </span>
                       </td>
                       <td className="px-6 py-4 text-right">
@@ -856,28 +875,31 @@ const Dashboard = ({ userInfo, tokenData, onConnectGmail, connectGmailError, gma
         <nav className="flex-1 px-4 space-y-1 overflow-y-auto custom-scrollbar">
           <div className="pb-4 pt-2">
             <p className="px-2 text-xs font-semibold text-slate-500 uppercase tracking-widest mb-4">Main Menu</p>
-            <button 
-              onClick={() => setSidebarView('home')}
+            <button
+              type="button"
+              onClick={() => { setPage('home'); setSidebarView('home'); }}
               className={`w-full flex items-center gap-3 px-3 py-2 rounded-lg font-medium transition-colors ${
-                sidebarView === 'home' ? 'text-primary bg-primary/10' : 'text-slate-400 hover:text-primary'
+                page === 'home' && sidebarView === 'home' ? 'text-primary bg-primary/10' : 'text-slate-400 hover:text-primary'
               }`}
             >
               <LayoutDashboard className="size-5" />
               <span>Home</span>
             </button>
-            <button 
-              onClick={() => setSidebarView('threats')}
+            <button
+              type="button"
+              onClick={() => setPage('threats')}
               className={`w-full flex items-center gap-3 px-3 py-2 rounded-lg font-medium transition-colors ${
-                sidebarView === 'threats' ? 'text-primary bg-primary/10' : 'text-slate-400 hover:text-primary'
+                page === 'threats' ? 'text-primary bg-primary/10' : 'text-slate-400 hover:text-primary'
               }`}
             >
               <ShieldAlert className="size-5" />
               <span>Threats</span>
             </button>
-            <button 
-              onClick={() => setSidebarView('emails-bin')}
+            <button
+              type="button"
+              onClick={() => { setPage('home'); setSidebarView('emails-bin'); }}
               className={`w-full flex items-center justify-between px-3 py-2 rounded-lg font-medium transition-colors ${
-                sidebarView === 'emails-bin' ? 'text-primary bg-primary/10' : 'text-slate-400 hover:text-primary'
+                page === 'home' && sidebarView === 'emails-bin' ? 'text-primary bg-primary/10' : 'text-slate-400 hover:text-primary'
               }`}
             >
               <div className="flex items-center gap-3">
@@ -888,10 +910,11 @@ const Dashboard = ({ userInfo, tokenData, onConnectGmail, connectGmailError, gma
                 <span className="bg-primary/20 text-primary px-2 py-0.5 rounded-full text-[10px] font-bold">{emailsInBin.length}</span>
               )}
             </button>
-            <button 
-              onClick={() => setSidebarView('analysis')}
+            <button
+              type="button"
+              onClick={() => { setPage('home'); setSidebarView('analysis'); }}
               className={`w-full flex items-center gap-3 px-3 py-2 rounded-lg font-medium transition-colors ${
-                sidebarView === 'analysis' ? 'text-primary bg-primary/10' : 'text-slate-400 hover:text-primary'
+                page === 'home' && sidebarView === 'analysis' ? 'text-primary bg-primary/10' : 'text-slate-400 hover:text-primary'
               }`}
             >
               <BarChart3 className="size-5" />
@@ -911,7 +934,7 @@ const Dashboard = ({ userInfo, tokenData, onConnectGmail, connectGmailError, gma
               <img 
                 alt="Profile" 
                 className="w-10 h-10 rounded-lg object-cover" 
-                src={userInfo.picture || 'https://via.placeholder.com/40'} 
+                src={userInfo?.picture ?? 'https://via.placeholder.com/40'} 
               />
               <div className="overflow-hidden">
                 <p className="text-sm font-bold truncate">{userEmail || 'Loading...'}</p>
@@ -934,7 +957,7 @@ const Dashboard = ({ userInfo, tokenData, onConnectGmail, connectGmailError, gma
             </div>
             <button className="relative p-2 text-slate-400 hover:text-primary transition-colors">
               <Bell className="size-5" />
-              {dashboardData && dashboardData.total_phishing > 0 && (
+              {dashboardData && (dashboardData?.total_phishing ?? 0) > 0 && (
                 <span className="absolute top-2 right-2 w-2 h-2 bg-red-500 rounded-full border-2 border-[#101622]"></span>
               )}
             </button>
@@ -968,7 +991,14 @@ const Dashboard = ({ userInfo, tokenData, onConnectGmail, connectGmailError, gma
           </div>
         )}
 
-        {renderContent()}
+        {page === 'home' && renderContent()}
+        {page === 'threats' && (
+          <Threats
+            incidents={incidents}
+            formatTimestamp={formatTimestamp}
+            onSelectIncident={(inc) => setSelectedIncident(inc as IncidentDisplay)}
+          />
+        )}
 
         {/* Footer Meta */}
         <footer className="mt-auto p-8 border-t border-slate-800 flex items-center justify-between text-xs text-slate-500 uppercase tracking-widest font-bold">
@@ -998,17 +1028,17 @@ const Dashboard = ({ userInfo, tokenData, onConnectGmail, connectGmailError, gma
                     <AlertTriangle className="size-8" />
                   </div>
                   <div>
-                    <h2 className="text-xl font-bold">Incident Analysis: {selectedIncident.category}</h2>
+                    <h2 className="text-xl font-bold">Incident Analysis: {selectedIncident?.category ?? 'Threat'}</h2>
                     <div className="flex items-center gap-2 mt-1">
                       <span className={`inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-black tracking-widest uppercase ${
-                        selectedIncident.severity === 'CRITICAL' ? 'bg-red-500 text-white' :
-                        selectedIncident.severity === 'WARNING' ? 'bg-amber-500 text-white' :
+                        (selectedIncident?.severity ?? '') === 'CRITICAL' ? 'bg-red-500 text-white' :
+                        (selectedIncident?.severity ?? '') === 'WARNING' ? 'bg-amber-500 text-white' :
                         'bg-slate-500 text-white'
                       }`}>
                         <span className="w-1.5 h-1.5 rounded-full bg-white animate-pulse"></span>
-                        {selectedIncident.severity}
+                        {selectedIncident?.severity ?? 'LOW'}
                       </span>
-                      <span className="text-xs text-slate-500 font-medium tracking-tight uppercase">Case ID: #{selectedIncident.id}</span>
+                      <span className="text-xs text-slate-500 font-medium tracking-tight uppercase">Case ID: #{selectedIncident?.id ?? ''}</span>
                     </div>
                   </div>
                 </div>
@@ -1029,15 +1059,15 @@ const Dashboard = ({ userInfo, tokenData, onConnectGmail, connectGmailError, gma
                   <div className="grid grid-cols-3 gap-4 bg-slate-800/50 p-4 rounded-xl border border-slate-800">
                     <div>
                       <p className="text-[10px] font-bold text-slate-500 uppercase">Timestamp</p>
-                      <p className="text-sm font-medium mt-1">{formatTimestamp(selectedIncident.timestamp)}</p>
+                      <p className="text-sm font-medium mt-1">{formatTimestamp(selectedIncident?.timestamp ?? '')}</p>
                     </div>
                     <div>
                       <p className="text-[10px] font-bold text-slate-500 uppercase">Source Email</p>
-                      <p className="text-sm font-medium mt-1 text-red-400">{selectedIncident.sourceDetail}</p>
+                      <p className="text-sm font-medium mt-1 text-red-400">{selectedIncident?.sourceDetail ?? '—'}</p>
                     </div>
                     <div>
                       <p className="text-[10px] font-bold text-slate-500 uppercase">Risk Score</p>
-                      <p className="text-sm font-medium mt-1">{Math.round(selectedIncident.risk_score * 100)}%</p>
+                      <p className="text-sm font-medium mt-1">{Math.round((selectedIncident?.risk_score ?? 0) * 100)}%</p>
                     </div>
                   </div>
                 </section>
@@ -1059,19 +1089,19 @@ const Dashboard = ({ userInfo, tokenData, onConnectGmail, connectGmailError, gma
                           r="36" 
                           stroke="currentColor" 
                           strokeDasharray={226.19} 
-                          strokeDashoffset={226.19 - (selectedIncident.risk_score * 226.19)} 
+                          strokeDashoffset={226.19 - ((selectedIncident?.risk_score ?? 0) * 226.19)} 
                           strokeWidth="6"
                         ></circle>
                       </svg>
                       <div className="absolute inset-0 flex flex-col items-center justify-center">
-                        <span className="text-lg font-bold">{Math.round(selectedIncident.risk_score * 100)}%</span>
+                        <span className="text-lg font-bold">{Math.round((selectedIncident?.risk_score ?? 0) * 100)}%</span>
                         <span className="text-[8px] font-bold text-slate-500">THREAT</span>
                       </div>
                     </div>
                     <div className="flex-1">
                       <p className="text-sm leading-relaxed text-slate-300">
                         The AegisAI engine flagged this email due to suspicious patterns detected in the content and URLs.
-                        {selectedIncident.severity === 'CRITICAL' && (
+                        {(selectedIncident?.severity ?? '') === 'CRITICAL' && (
                           <span className="text-red-500 font-medium"> High confidence phishing attempt detected.</span>
                         )}
                       </p>
@@ -1079,14 +1109,14 @@ const Dashboard = ({ userInfo, tokenData, onConnectGmail, connectGmailError, gma
                   </div>
                 </section>
 
-                {selectedIncident.snippet && (
+                {(selectedIncident?.snippet ?? '') && (
                   <section>
                     <div className="flex items-center gap-2 mb-4">
                       <Mail className="text-primary size-4" />
                       <h3 className="text-sm font-bold uppercase tracking-wider text-slate-500">Email Preview</h3>
                     </div>
                     <div className="bg-slate-800/50 p-4 rounded-lg border border-slate-800">
-                      <p className="text-sm text-slate-300">{selectedIncident.snippet}</p>
+                      <p className="text-sm text-slate-300">{selectedIncident?.snippet ?? ''}</p>
                     </div>
                   </section>
                 )}

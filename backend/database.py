@@ -133,25 +133,31 @@ def get_dashboard_data(user_email: str) -> dict[str, Any]:
         for row in cursor.fetchall()
     ]
     
-    # Recent incidents (last 10)
+    # Recent incidents: fetch more then deduplicate by (sender, subject) so each threat shows once
     cursor.execute("""
         SELECT id, sender, subject, severity, timestamp, final_risk_score
         FROM detections
         WHERE user_email = ?
         ORDER BY timestamp DESC
-        LIMIT 10
+        LIMIT 100
     """, (user_email,))
-    recent_incidents = [
-        {
+    seen_keys: set[tuple[str, str]] = set()
+    recent_incidents = []
+    for row in cursor.fetchall():
+        key = (row["sender"] or "", row["subject"] or "")
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
+        recent_incidents.append({
             "id": str(row["id"]),
             "sender": row["sender"],
             "subject": row["subject"],
             "severity": row["severity"],
             "timestamp": row["timestamp"],
             "risk_score": row["final_risk_score"],
-        }
-        for row in cursor.fetchall()
-    ]
+        })
+        if len(recent_incidents) >= 10:
+            break
     
     conn.close()
     
@@ -179,10 +185,16 @@ def get_recent_incidents(user_email: str, limit: int = 20) -> list[dict[str, Any
         WHERE user_email = ?
         ORDER BY timestamp DESC
         LIMIT ?
-    """, (user_email, limit))
+    """, (user_email, limit * 5))
     
-    incidents = [
-        {
+    seen_keys: set[tuple[str, str]] = set()
+    incidents = []
+    for row in cursor.fetchall():
+        key = (row["sender"] or "", row["subject"] or "")
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
+        incidents.append({
             "id": str(row["id"]),
             "sender": row["sender"],
             "subject": row["subject"],
@@ -190,9 +202,9 @@ def get_recent_incidents(user_email: str, limit: int = 20) -> list[dict[str, Any
             "timestamp": row["timestamp"],
             "risk_score": row["final_risk_score"],
             "snippet": row["email_snippet"],
-        }
-        for row in cursor.fetchall()
-    ]
+        })
+        if len(incidents) >= limit:
+            break
     
     conn.close()
     return incidents

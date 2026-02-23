@@ -27,6 +27,7 @@ from utils import (
     calculate_final_risk_score,
     calculate_url_risk_score,
     extract_urls,
+    get_cors_origins,
     load_env,
     severity_from_confidence,
     severity_from_risk_score,
@@ -48,16 +49,33 @@ app = FastAPI(
 )
 
 # --------------------------------------------------
-# CORS CONFIG
+# CORS CONFIG (must allow frontend origin for preflight + requests)
 # --------------------------------------------------
 
+_DEFAULT_CORS_ORIGINS = [
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    "https://ageis-ai-nine.vercel.app",
+    "https://ageis-pl0vmfsra-hima-parvathi-as-projects.vercel.app",
+]
+
+
+def _cors_origins() -> list[str]:
+    env_origins = get_cors_origins()
+    if env_origins == ["*"]:
+        return ["*"]
+    combined = list(_DEFAULT_CORS_ORIGINS)
+    for o in env_origins:
+        if o and o not in combined:
+            combined.append(o)
+    return combined
+
+
+_origins = _cors_origins()
+logger.info("CORS allow_origins: %s", _origins)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",
-        "http://127.0.0.1:3000",
-        "https://ageis-ai-nine.vercel.app",
-    ],
+    allow_origins=_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
