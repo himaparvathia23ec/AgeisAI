@@ -55,7 +55,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "http://localhost:3000",
-        "https://ageis-pl0vmfsra-hima-parvathi-as-projects.vercel.app",
+        "https://ageis-ai-nine.vercel.app",
     ],
     allow_credentials=True,
     allow_methods=["*"],
